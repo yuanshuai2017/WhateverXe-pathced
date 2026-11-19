@@ -5,7 +5,7 @@ import re,subprocess,tempfile
 r=Path(__file__).resolve().parents[1];s=(r/'WhateverXe/kern_xe.cpp').read_text()
 state=re.search(r'struct ComboClockTransaction \{.*?\n\}',s,re.S).group()
 state+=' comboClockTransaction;\n'+re.search(r'static bool comboClockAccess\(.*?\n\}',s,re.S).group()
-functions='\n'.join(re.search(r'(?:bool|void) XE::'+n+r'\(.*?\n\}',s,re.S).group() for n in ['comboBeginClock','comboEndClock'])
+functions='\n'.join(re.search(r'(?:bool|void) XE::'+n+r'\(.*?\n\}',s,re.S).group() for n in ['comboBeginClock','comboEndClock','comboClockTranslateWrite'])
 code=r'''
 #include "kern_adls_clock.hpp"
 #include "kern_dsi_restart.hpp"
@@ -21,6 +21,7 @@ void IORecursiveLockUnlock(IORecursiveLock *l){assert(l->depth);--l->depth;}
 uintptr_t thread=1;
 void *current_thread(){return reinterpret_cast<void *>(thread);}
 unsigned refs=0,getCount=0,putCount=0,reads=0;
+bool dropGateWrite=false;
 std::map<unsigned long,uint32_t> mmio;
 struct {Display13Transcoder::Bindings transcoders;XELP::DSI::Readout bootDSI;} display13FBPower;
 alignas(8) uint8_t ctl[0xf00]{},port[0x700]{},access[0x80]{},power[0x100]{};
@@ -29,6 +30,7 @@ template<class T>T &at(void *p,unsigned off){return *reinterpret_cast<T *>(stati
 struct IORegistryEntry {
  static IORegistryEntry *getRegistryRoot(){static IORegistryEntry o;return &o;}
  void setProperty(const char *,void *,unsigned){}
+ void setProperty(const char *,bool){}
 };
 uint32_t readNative(void *a,unsigned long reg){assert(a==access && refs && mmio.count(reg));++reads;return mmio.at(reg);}
 void getPG(void *p,uint32_t pg){assert(p==power && pg==1);++refs;++getCount;}
@@ -49,6 +51,12 @@ struct XE {
  static uint32_t comboClockRead(void *a,unsigned long r){return readNative(a,r);}
  static bool comboBeginClock(void*,void*,bool,bool&,void *other=nullptr);
  static void comboEndClock();
+ static bool comboClockTranslateWrite(void*,unsigned long&,uint32_t&,uintptr_t);
+ uintptr_t framebufferClockImage=0x10000000;
+ static void comboClockWrite(void *a,unsigned long r,uint32_t value){
+  assert(a==access && refs && r==0x1642bc);
+  if(!dropGateWrite)mmio.at(r)=value;
+ }
 } xe,*callbackXE=&xe;
 #define FunctionCast(f,p) reinterpret_cast<decltype(&f)>(p)
 STATE
@@ -81,6 +89,40 @@ int main(){
  mmio[0x45404]=3;mmio[0x164280]=UINT32_MAX;
  assert(!XE::comboBeginClock(ctl,port,true,keep));
  assert(!refs && !lock.depth && getCount==putCount && !comboClockTransaction.thread);
+ // Actual clock transaction intercepts the donor's gate writes on PHY D
+ // while a DP peer owns PHY C / PLL2. Failed readback retains the reservation.
+ config[0]=5;
+ const uint32_t peerMux=0x00e00c20;
+ mmio={{0x45404,3},{0x164280,peerMux},{0x1642bc,0x30},
+       {0x46010,0},{0x46014,0},{0x46018,0xCC000000},{0x46030,0}};
+ assert(XE::comboBeginClock(ctl,port,true,keep) && !keep);
+ assert(comboClockTransaction.translation.pll==0);
+ unsigned long mux=0x164280;uint32_t value=0;
+ const auto program=[&](unsigned long &reg,uintptr_t off) {
+  return XE::comboClockTranslateWrite(access,reg,value,xe.framebufferClockImage+off);
+ };
+ assert(program(mux,0x6D77E)); // PLL not locked yet
+ assert(mmio.at(0x1642bc)==0x30);
+ mmio[0x46010]=0xCC000000;
+ assert(program(mux,0x6D77E));
+ assert(mmio.at(0x1642bc)==0x20 && mmio.at(0x164280)==peerMux);
+ XE::comboEndClock();
+ assert(XE::comboBeginClock(ctl,port,false,keep) && !keep);
+ unsigned long pll=0x46018;
+ assert(program(pll,0x6DD44)); // preserve the PLL until the gate write
+ dropGateWrite=true;
+ assert(program(mux,0x6DD00) && program(pll,0x6DD44));
+ XE::comboEndClock();
+ assert(comboClockTransaction.allocation.binding[3]==1 && mmio.at(0x46010)==0xCC000000);
+ dropGateWrite=false;
+ assert(XE::comboBeginClock(ctl,port,false,keep) && !keep);
+ assert(program(mux,0x6DD00));
+ assert(!program(pll,0x6DD44) && pll==0x46010);
+ mmio[0x46010]=0;XE::comboEndClock();
+ assert(!comboClockTransaction.allocation.binding[3]);
+ assert(mmio.at(0x1642bc)==0x30 && mmio.at(0x164280)==peerMux);
+ assert(mmio.at(0x46018)==0xCC000000 && !refs && !lock.depth);
+ config[0]=0;
  // TGL and Display13 must never scan or allocate ADL-S extra PLL banks.
  for(bool d13:{false,true}) {
   xe.adlsDisplaySelected=false;xe.display13FramebufferRequested=d13;

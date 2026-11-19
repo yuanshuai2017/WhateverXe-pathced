@@ -15,11 +15,15 @@
 #include "kern_display13_fb_topology.hpp"
 struct OSObject {virtual ~OSObject()=default;};
 struct OSData:OSObject {std::vector<uint8_t> data;void *getBytesNoCopy(){return data.data();}uint32_t getLength(){return data.size();}};
-struct IOService {OSObject *property {};unsigned reads {};OSObject *getProperty(const char *name){assert(!strcmp(name,"tgl-hdmi-wiring"));++reads;return property;}};
+struct IOService {OSObject *property {};unsigned reads {};uint32_t identity {},subsystem {};
+ uint32_t configRead32(unsigned r){assert(r==0 || r==0x2C);return r?subsystem:identity;}OSObject *getProperty(const char *name){assert(!strcmp(name,"tgl-hdmi-wiring"));++reads;return property;}};
 struct IORegistryEntry {
  static IORegistryEntry *getRegistryRoot(){static IORegistryEntry r;return &r;}
  template<class... A> void setProperty(A...){}
 };
+using IOPCIDevice=IOService;
+bool tc3Requested=false;
+bool checkKernelArgument(const char *arg){assert(!strcmp(arg,"-wex-adls-tc3-hdmi"));return tc3Requested;}
 #define OSDynamicCast(t,p) dynamic_cast<t*>(p)
 #define FunctionCast(f,p) reinterpret_cast<decltype(&f)>(p)
 #define arrsize(a) (sizeof(a)/sizeof(a[0]))
@@ -88,6 +92,30 @@ int main(){
  }
  setup();object.adlsDisplaySelected=true;auto foreignWiring=property(2,0,2,0);IOService wrongADLS{&foreignWiring};
  assert(!XE::tglLoadHDMIWiring(&wrongADLS) && !XE::tglLoadHDMIWiring(&wrongADLS));
+ // Keep the donor's DP record on DDI 4 and use the firmware DDC on DDI 5.
+ for(unsigned trial=0;trial<4;++trial) {
+  setup();object.adlsDisplaySelected=true;tc3Requested=trial!=0;
+  IOService board;board.identity=trial==2?0x46808086:0x46908086;
+  board.subsystem=trial==3?0x123417AA:0x332C17AA;
+  auto &v=object.firmwarePorts;v.status=XELP::VBT::Status::Valid;v.present=0x70;
+  v.port[4]={0x60D6,8,3,0x20,0xC0,0};
+  v.port[5]={0x60D2,3,4,0,0xC0,0,4};
+  v.port[6]={0x68C6,0xB,5,0x50,0xC0,0};
+  for(unsigned d:{4U,5U})reinterpret_cast<uint32_t *>(original+0x20+24*d)[1]=d+6;
+  assert(XE::tglLoadHDMIWiring(&board) && XE::wrapTGLGetOSInformation(controller));
+  const auto &w=object.adlsWiring;
+  assert(w.dp==0x10 && w.hdmi==(trial==1?0x20:0) && w.excluded==(trial==1?0x40:0x60));
+  auto hdmi=reinterpret_cast<uint32_t *>(platform()+0x20+24*5);
+  assert((w.backend()==0x39)==(trial==1));
+  assert((w.hotplugMode(true,hdmi,platform(),0x100,0x100,4)==1)==(trial==1));
+  assert(w.hotplugMode(true,hdmi,platform(),0x101,0x100,4)==4);
+  assert(w.hotplugMode(true,hdmi,platform(),0x100,0x100,0)==0);
+  assert(w.usesDDC(11)==(trial==1));
+  uint32_t request[16]{};request[1]=1;request[3]=0xA0;request[14]=128;
+  assert(XE::wrapTGLGMBus(controller,11,0,request)==(trial==1?0x91u:0xE00002C2u));
+  assert(nativeGMBusCalls==unsigned(trial==1));
+ }
+ tc3Requested=false;
  // Panel + external HDMI/DP use the real firmware loader and topology copy.
  for(unsigned kind:{1U,2U})for(unsigned tcon:{0U,2U,3U}) {
   setup();object.adlsDisplaySelected=true;auto &v=object.firmwarePorts;

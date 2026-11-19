@@ -26,6 +26,7 @@ int main(int argc,char **argv) {
  assert(argc==2 || argc==3);const bool adln=!strncmp(argv[1],"adln",4);
  const bool rpls=!strncmp(argv[1],"rpls",4);
  const bool adls=!strncmp(argv[1],"adls",4) || rpls;
+ const bool tc3HDMI=!strcmp(argv[1],"adls-tc3-hdmi");
  const bool adlp=!strncmp(argv[1],"adlp",4) || !strncmp(argv[1],"rplp",4);
  const bool legacy=!strncmp(argv[1],"adln-abi1",9);
  const bool fake=strstr(argv[1],"fake")!=nullptr;
@@ -72,6 +73,10 @@ int main(int argc,char **argv) {
  assert(!xelpDisplay13Device(&foreignPCI));
  config.combo=3;config.comboBackend=adln?3:7;config.legacy=adln?0:0x1F8;config.legacyBackend=adln?0:0x1F8;
  if(adls){config.combo=8;config.comboBackend=0x19;config.legacy=config.legacyBackend=0;}
+ if(tc3HDMI) {
+  config.combo=0x30;config.comboBackend=0x39;config.excluded=0x40;
+  auto old=config;old.comboBackend=0x19;assert(!xelpConfigureDisplay(&controller,&old));
+ }
  if(adls && !rejected){assert(hardwareAllowed(&controller));assert(!tglProbePort(&port));}
  if(adlp){config.combo=0;config.comboBackend=3;config.legacy=8;config.legacyBackend=0x78;}
  // The contract derives generation from physical identity, not boot args.
@@ -105,6 +110,19 @@ int main(int argc,char **argv) {
  assert(xelpConfigureDisplay(&controller,&config));assert(controller.retains==1);
  malformed=config;malformed.combo=1;assert(!xelpConfigureDisplay(&controller,&malformed));
  if(adln){assert(xelpConfigurePortProbe(&controller,1,3,3));assert(!xelpConfigurePortProbe(&controller,2,3,3));}
+ if(tc3HDMI) {
+  auto dp=reinterpret_cast<uint32_t *>(platform+0x20+24*4);
+  auto hdmi=reinterpret_cast<uint32_t *>(platform+0x20+24*5);
+  const uint32_t dpRecord[]={4,10,1,0,0x400,0x201},hdmiRecord[]={5,11,2,0,0x800,0x202};
+  memcpy(dp,dpRecord,sizeof(dpRecord));memcpy(hdmi,hdmiRecord,sizeof(hdmiRecord));
+  field<void *>(&port,0x548)=dp;assert(tglProbePort(&port)==1);
+  field<void *>(&port,0x548)=hdmi;assert(tglProbePort(&port)==1);
+  hdmi[1]=10;assert(tglProbePort(&port)==0);
+  const uint32_t wrongTransport[]={5,11,1,0,0x400,0x201};
+  memcpy(hdmi,wrongTransport,sizeof(wrongTransport));assert(tglProbePort(&port)==0);
+  puts("PASS TC2 DP and TC3 HDMI share the bound Compat configuration");
+  return 0;
+ }
  if(adlp){
   auto rec=reinterpret_cast<uint32_t *>(platform+0x20+24*3);
   const uint32_t values[]={3,9,2,1,0x800,0x202};memcpy(rec,values,sizeof(values));field<void *>(&port,0x548)=rec;

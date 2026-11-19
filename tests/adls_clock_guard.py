@@ -44,12 +44,16 @@ int main(){
  for(unsigned ddi:{0u,3u,4u,5u,6u})for(bool isDP:{false,true}) {
   state.adlsWiring={};state.adlsWiring.valid=true;
   (isDP?state.adlsWiring.dp:state.adlsWiring.hdmi)=1U<<ddi;
-  state.adlsWiring.pin[ddi]=isDP?(ddi?ddi+6:1):12;
+  state.adlsWiring.pin[ddi]=isDP?(ddi?ddi+6:1):ddi==5?11:12;
   AlderLakeS::Port route;assert(AlderLakeS::Port::resolve(ddi,route));
   uint32_t config[]={ddi,state.adlsWiring.pin[ddi],isDP?1U:2U,0,isDP?0x400U:0x800U,isDP?0x201U:0x202U};
   auto bound=reinterpret_cast<uint32_t *>(state.tglPlatformCopy+0x20+24*ddi);memcpy(bound,config,sizeof(config));
   at<void *>(port,0x548)=bound;at<uint32_t>(port,0x5B8)=route.phyBase()+0x10C;
-  assert(XE::adlsClockTarget(ctl,port,nullptr)==(ddi<=4));
+  assert(XE::adlsClockTarget(ctl,port,nullptr)==(ddi<=4 || (ddi==5 && !isDP)));
+  if(ddi==5 && !isDP){
+   state.adlsWiring.pin[ddi]=bound[1]=10; // even a matching but wrong HDMI DDC is refused.
+   assert(!XE::adlsClockTarget(ctl,port,nullptr));
+  }
   state.adlsWiring.valid=false;assert(!XE::adlsClockTarget(ctl,port,nullptr));
  }
  state={};state.adlsClockReady=true;state.tglObservationController=ctl;state.adlsWiring.valid=true;state.adlsWiring.panel=1;
@@ -58,7 +62,7 @@ int main(){
  at<uint32_t>(port,0x5b8)=0x16210c;at<uint32_t>(access,0x60)=0x200000;
  assert(XE::adlsClockTarget(ctl,port,nullptr));
  state.adlsWiring.panel=0;assert(!XE::adlsClockTarget(ctl,port,nullptr));
- puts("PASS ADL-S runtime clock guard: exact owner, immutable TC1/TC2 configurations, mapped Combo B/C and no shared port");
+ puts("PASS ADL-S runtime clock guard: exact owner, immutable TC1/TC2 and qualified TC3 HDMI configurations and no shared port");
 }'''.replace('FUNCTION',function)
 with tempfile.TemporaryDirectory(prefix='adls-clock-guard-') as d:
  d=Path(d);(d/'test.cpp').write_text(code)

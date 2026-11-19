@@ -13,7 +13,7 @@ fixture = (root / "provider_binding_fixture.cpp").read_text().replace("// PROVID
 with tempfile.TemporaryDirectory(prefix="xelp-provider-binding-") as directory:
     directory = Path(directory)
     exe = compile_fixture(directory, fixture)
-    for mode in ["adln-map-small", "adln-map-large", "adlp-map-small", "tgl-map-small", "adlp-fb", "adlp-auto", "rplp-auto", "tgl", "tgl-9a40", "tgl-g4", "adln", "adln-16eu", "adln-abi1", "unknown", "adln-revision", "adln-fake", "tgl-fake", "adln-abi1-fake", "adls", "adls-revision", "rpls", "rpls-revision"]:
+    for mode in ["adln-map-small", "adln-map-large", "adlp-map-small", "tgl-map-small", "adlp-fb", "adlp-auto", "rplp-auto", "tgl", "tgl-9a40", "tgl-g4", "adln", "adln-16eu", "adln-abi1", "unknown", "adln-revision", "adln-fake", "tgl-fake", "adln-abi1-fake", "adls", "adls-tc3-hdmi", "adls-revision", "rpls", "rpls-revision"]:
         subprocess.run([str(exe), mode], check=True)
     # Every Linux ADL-P/RPL-P/U ID formerly missing from the shared table must
     # pass the actual Compat binding, physical-owner and native probe paths.

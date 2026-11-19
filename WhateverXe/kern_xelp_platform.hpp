@@ -111,10 +111,13 @@ struct ProbeConfig {
     bool valid() const {
         if(abi!=ProbeABI || bytes!=sizeof(ProbeConfig) || !profile.displayAdmitted() ||
            !same(profile,identify(profile.identity,profile.revision,profile.effectiveIdentity)))return false;
-        // ADL-S firmware routes use the donor's three Combo PHY slots.
+        // PHY D shares the existing donor clock code through WhateverXe.
         // Its TC label grants neither Type-C nor Dekel register access.
         if(displayAdapter(profile.family)==DisplayAdapter::ADLS) {
-            const auto capacity=ADLSComboBackend::mask(profile.donor);
+            const auto native=ADLSComboBackend::mask(profile.donor);
+            const auto tc3=ADLSComboBackend::tc3;
+            const auto capacity=native|((combo&tc3) && native &&
+                ADLSComboBackend::tc3HDMIIdentity(profile.identity)?tc3:0);
             return profile.display==Display::XeD && combo && !(combo&~capacity) && comboBackend==capacity &&
                 !(excluded&~PortMask) && !(excluded&combo) && !legacy && !typeC && !legacyBackend;
         }

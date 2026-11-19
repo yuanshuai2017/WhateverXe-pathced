@@ -3095,7 +3095,7 @@ struct ComboClockTransaction {
     XELPComboClock::ClockAllocation allocation;
     XELPComboClock::ClockTranslation translation;
     XELPComboClock::ClockSnapshot before;
-    bool keepPLL {};
+    bool keepPLL {},phyDGateApplied {};
 } comboClockTransaction;
 static bool comboClockAccess(void *access) {
     auto &t=comboClockTransaction;
@@ -4336,7 +4336,7 @@ bool XE::xelpBindProbe(void *controller) {
     XELP::ProbeConfig config;config.profile=xeProfile;
     if(adlsDisplaySelected) {
         if(!tglHDMIWiringApplied || !adlsWiring.valid || !adlsWiring.selected())return false;
-        config.combo=adlsWiring.selected();config.comboBackend=AlderLakeS::ComboBackendMask;
+        config.combo=adlsWiring.selected();config.comboBackend=adlsWiring.backend();
         config.excluded=adlsWiring.excluded;
     } else if(xeProfile.display==XELP::Display::XeD) {
         if(!tglHDMIWiringApplied || !tglTCWiringLoaded || !tglTCWiring.valid)return false;
@@ -8065,7 +8065,8 @@ void XE::wrapDisplay13GMBusWrite(void *access,uint64_t reg,uint32_t value) {
     }
     // DISPLAY13_COMBO_FRACTION_END
     unsigned long clockReg=reg;
-    comboClockTranslateWrite(access,clockReg,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));reg=clockReg;
+    if(comboClockTranslateWrite(access,clockReg,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0))))return;
+    reg=clockReg;
     // This route also carries direct native cursor writes, outside the WM
     // trigger queue. Apply Display 13's slot WA only to our proven owner.
     if(reg==0x70080 || reg==0x71080 || reg==0x72080) {
@@ -13472,6 +13473,12 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
     const uint8_t adlsClockOnReplace[]={0x48,0x63,0x00,0x48,0xd1,0xe8,0x90,0x48,0x83,0xf8,0x03,0x0f,0x1f,0x00};
     const uint8_t adlsClockSelectCPLLFind[]={0x83,0xc8,0x10};
     const uint8_t adlsClockSelectCPLLReplace[]={0x83,0xc8,0x20};
+    // DDI 4 and 5 both use donor slot 2. Normalize only the local switch
+    // operand, preserving the physical port record for power, HPD and DDC.
+    const uint8_t adlsClockTC3Find[]={0x48,0xff,0x05,0x88,0x84,0x07,0x00,
+     0x49,0x8b,0xb6,0x48,0x05,0x00,0x00,0x8b,0x0e,0x83,0xf9,0x02};
+    const uint8_t adlsClockTC3Replace[]={0x49,0x8b,0xb6,0x48,0x05,0x00,0x00,
+     0x8b,0x0e,0x83,0xf9,0x05,0x75,0x02,0xff,0xc9,0x83,0xf9,0x04};
     const uint8_t adlsClockSelectCFind[]={0x83,0xf9,0x02};
     const uint8_t adlsClockSelectCReplace[]={0x83,0xf9,0x04};
     const uint8_t adlsClockSelectFind[]={0x83,0xf9,0x01};
@@ -13489,6 +13496,13 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
      orgTGLRegisterRead && orgTGLRegisterWrite && orgTGLDisableClocks && tglClockOffCaller && tglComboPLLFractionCaller &&
      fn==address+0x6CE10 && size>0x6DCBD && !memcmp(reinterpret_cast<void *>(fn),entry,sizeof(entry));
     struct Site {uint32_t offset;const uint8_t *find,*replace;size_t bytes;};
+    const bool tc3=adlsWiring.hdmi&AlderLakeS::TC3;
+    const uint8_t muxWrite[]={0xff,0x90,0x30,0x01,0x00,0x00};
+    const uint8_t gateWrite[]={0xff,0x91,0x30,0x01,0x00,0x00};
+    if(tc3)ready=ready && size>0x6DD00 &&
+     !memcmp(reinterpret_cast<void *>(address+0x6D209),adlsClockTC3Find,sizeof(adlsClockTC3Find)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x6D778),muxWrite,sizeof(muxWrite)) &&
+     !memcmp(reinterpret_cast<void *>(address+0x6DCFA),gateWrite,sizeof(gateWrite));
     const Site sites[]={{0x6CFD3,adlsClockOnFind,adlsClockOnReplace,sizeof(adlsClockOnFind)},
      {0x6D4A2,adlsClockSelectCPLLFind,adlsClockSelectCPLLReplace,sizeof(adlsClockSelectCPLLFind)},
      {0x6D219,adlsClockSelectCFind,adlsClockSelectCReplace,sizeof(adlsClockSelectCFind)},
@@ -13507,6 +13521,18 @@ bool XE::processKextFull(KernelPatcher &patcher, size_t index, mach_vm_address_t
       patcher.clearError();
      }
     }
+    if(ready && tc3) {
+     // The regular DDI 4 patch has already run at the tail of this window.
+     uint8_t expected[sizeof(adlsClockTC3Find)];
+     memcpy(expected,adlsClockTC3Find,sizeof(expected));
+     memcpy(expected+16,adlsClockSelectCReplace,sizeof(adlsClockSelectCReplace));
+     KernelPatcher::LookupPatch patch {currentFramebuffer,expected,adlsClockTC3Replace,sizeof(expected),1};
+     const auto site=reinterpret_cast<uint8_t *>(address+0x6D209);
+     patcher.applyLookupPatch(&patch,site,sizeof(expected)+1);
+     ready=!memcmp(site,adlsClockTC3Replace,sizeof(expected));
+     patcher.clearError();
+    }
+    if(tc3)IORegistryEntry::getRegistryRoot()->setProperty("WEXADLSTC3HDMIClockReady",ready);
     adlsClockReady=ready;
     IORegistryEntry::getRegistryRoot()->setProperty("ADLSClockReady",ready);
     const char *pg="__ZN19AppleIntelPowerWell21hwSetPowerWellStatePGEbj";
@@ -14139,9 +14165,12 @@ bool XE::tglLoadHDMIWiring(IOService *provider) {
    self->tglHDMIB=false;
    // The legacy five-word property addresses TGL Combo A/B/C, not ADL-S.
    if(provider && provider->getProperty("tgl-hdmi-wiring"))return false;
-   self->adlsWiring=AlderLakeS::Wiring::fromFirmware(self->firmwarePorts);
+   const auto pci=OSDynamicCast(IOPCIDevice,provider);
+   const bool tc3=checkKernelArgument("-wex-adls-tc3-hdmi") && pci &&
+    AlderLakeS::tc3HDMIBoard(true,pci->configRead32(0),pci->configRead32(0x2C));
+   self->adlsWiring=AlderLakeS::Wiring::fromFirmware(self->firmwarePorts,tc3);
    self->tglHDMIB=self->adlsWiring.valid && self->adlsWiring.selected();
-   uint32_t routes[]={self->adlsWiring.hdmi,self->adlsWiring.dp,self->adlsWiring.excluded,AlderLakeS::ComboBackendMask,self->adlsWiring.panel};
+   uint32_t routes[]={self->adlsWiring.hdmi,self->adlsWiring.dp,self->adlsWiring.excluded,self->adlsWiring.backend(),self->adlsWiring.panel};
    IORegistryEntry::getRegistryRoot()->setProperty("ADLSFirmwareRoutes",routes,sizeof(routes));
   }
   return self->tglHDMIB;
@@ -16807,7 +16836,8 @@ uint32_t XE::wrapTGLSetPortMode(void *port, uint32_t mode) {
   reinterpret_cast<uintptr_t>(caller),self->tglNativeLegacyHPDCaller,mode);
  if(mode!=requestedMode) {
   uint32_t record[]={traceDDI,requestedMode,mode};
-  IORegistryEntry::getRegistryRoot()->setProperty("ADLSDPHotplugMode",record,sizeof(record));
+  IORegistryEntry::getRegistryRoot()->setProperty(traceDDI==5?"WEXADLSTC3HDMIHotplugMode":"ADLSDPHotplugMode",
+   record,sizeof(record));
  }
  if(!self->tglTCModeAllowed(traceDDI,mode) &&
     self->tglRegisterLegacyHPD(traceDDI,mode,reinterpret_cast<uintptr_t>(caller))) {
@@ -19000,7 +19030,7 @@ bool XE::adlsClockTarget(void *controller,void *port,void *otherPort) {
     if(!config)return false;
     AlderLakeS::Port route;uint32_t slot;
     return self->adlsWiring.bound(self->tglPlatformCopy,config) &&
-        XELP::ADLSComboBackend::clockSlot(XELP::Donor::C004FC1A,config[0],slot) &&
+        XELP::ADLSComboBackend::clockSlot(XELP::Donor::C004FC1A,config[0],slot,self->adlsWiring.hdmi&AlderLakeS::TC3) &&
         AlderLakeS::Port::resolve(config[0],route) && slot==route.phy && access &&
         *reinterpret_cast<void **>(p+0x578)==access && *reinterpret_cast<uint32_t *>(p+0x5B8)==route.phyBase()+0x10C &&
         *reinterpret_cast<uint32_t *>(access+0x60)>=0x1642C8;
@@ -19090,12 +19120,12 @@ bool XE::comboBeginClock(void *controller,void *port,bool enable,bool &keepPLL,v
     const auto otherConfig=other && other!=port ? *reinterpret_cast<uint32_t **>(static_cast<uint8_t *>(other)+0x548):nullptr;
     const auto choice=enable && otherConfig ? t.allocation.share(XELPComboClock::Port(otherConfig[0]),snapshot):
         t.allocation.choose(route,snapshot,enable);
-    if(!choice.valid || route.phy>=snapshot.slots() || t.allocation.external[route.phy]) {
+    if(!choice.valid || route.phy>=snapshot.phys() || t.allocation.external[route.phy]) {
         comboClockPower(power,false);IORecursiveLockUnlock(t.lock);return false;
     }
     if(enable)t.allocation.binding[route.phy]=choice.pll+1;
     t.translation={route.phy,choice.pll,enable};t.before=snapshot;
-    t.access=access;t.power=power;t.keepPLL=keepPLL=choice.keepPLL;
+    t.access=access;t.power=power;t.keepPLL=keepPLL=choice.keepPLL;t.phyDGateApplied=false;
     __atomic_store_n(&t.thread,reinterpret_cast<uintptr_t>(current_thread()),__ATOMIC_RELEASE);
     return true;
 }
@@ -19105,25 +19135,39 @@ void XE::comboEndClock() {
     auto tr=t.translation;XELPComboClock::PLL pll;
     const auto state=XELPComboClock::PLL::resolve(tr.pll,pll)?comboClockRead(t.access,pll.enable):0;
     const auto mux=comboClockRead(t.access,0x164280);
-    if(!tr.enabling && (t.keepPLL || !(state&0xCC000000U)))t.allocation.binding[tr.phy]=0;
+    if(!tr.enabling && (tr.phy!=3 || t.phyDGateApplied) && (t.keepPLL || !(state&0xCC000000U)))
+        t.allocation.binding[tr.phy]=0;
     uint32_t record[]={2,tr.phy,tr.pll,tr.enabling,t.keepPLL,t.before.mux[0],t.before.mux[1],mux,state};
+    const bool phyDGateApplied=t.phyDGateApplied;
     __atomic_store_n(&t.thread,0,__ATOMIC_RELEASE);
     comboClockPower(t.power,false);
     IORecursiveLockUnlock(t.lock);
     char key[40];snprintf(key,sizeof(key),"WEXComboClockPHY%u%s",tr.phy,tr.enabling?"Enable":"Disable");
     IORegistryEntry::getRegistryRoot()->setProperty(key,record,sizeof(record));
+    if(tr.phy==3)IORegistryEntry::getRegistryRoot()->setProperty(
+        tr.enabling?"WEXADLSTC3HDMIClockEnabled":"WEXADLSTC3HDMIClockGated",phyDGateApplied);
 }
 
-void XE::comboClockTranslateWrite(void *access,unsigned long &reg,uint32_t &value,uintptr_t caller) {
-    if(!comboClockAccess(access))return;
+bool XE::comboClockTranslateWrite(void *access,unsigned long &reg,uint32_t &value,uintptr_t caller) {
+    if(!comboClockAccess(access))return false;
     const auto pc=XELPComboClock::donorPC(callbackXE->framebufferClockImage,caller);
-    const auto &tr=comboClockTransaction.translation;
+    auto &tx=comboClockTransaction;
+    const auto &tr=tx.translation;
+    if(tr.phyDGateSite(reg,pc)) {
+        tx.phyDGateApplied=tr.applyPhyDGate([&](uint32_t r){return comboClockRead(access,r);},
+            [&](uint32_t r,uint32_t v){comboClockWrite(access,r,v);});
+        return true;
+    }
+    // A failed gate write must not disable a PLL still driving PHY D.
+    if(tr.phy==3 && !tr.enabling && !tx.phyDGateApplied &&
+       tr.caller(pc) && reg==0x46018)return true;
     reg=tr.reg(reg,pc);
     if(reg==0x164280 && tr.enabling && pc==0x6D77E) {
         value=tr.mux(value,pc);
         tr.prepareMux([&](uint32_t r){return comboClockRead(access,r);},
             [&](uint32_t r,uint32_t v){comboClockWrite(access,r,v);},value);
     }
+    return false;
 }
 
 void XE::wrapTGLComboEnableClocks(void *controller,void *port,void *other,uint32_t *params) {
@@ -19163,7 +19207,8 @@ bool XE::wrapADLSPortInit(void *port,uint32_t *config) {
     const bool ready=callbackXE->adlsPortInitReady &&
         callbackXE->adlsWiring.bound(callbackXE->tglPlatformCopy,config) &&
         *reinterpret_cast<uint32_t **>(bytes+0x548)==config &&
-        AlderLakeS::comboRegisters(config[0],reinterpret_cast<uint32_t *>(bytes+0x580),0x128/4);
+        AlderLakeS::comboRegisters(config[0],reinterpret_cast<uint32_t *>(bytes+0x580),0x128/4,
+            callbackXE->adlsWiring.hdmi&AlderLakeS::TC3);
     char key[40];snprintf(key,sizeof(key),"ADLSComboPort%uReady",config[0]);
     IORegistryEntry::getRegistryRoot()->setProperty(key,ready);
     return ready;
@@ -19434,7 +19479,7 @@ void XE::wrapTGLRegisterWrite(void *access, unsigned long reg, uint32_t value) {
 			}
 		}
 	}
-    comboClockTranslateWrite(access,reg,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0)));
+    if(comboClockTranslateWrite(access,reg,value,reinterpret_cast<uintptr_t>(__builtin_return_address(0))))return;
 	auto &tx = tglClockOffTransaction;
 	if (callbackXE->tglClockOffCaller && reinterpret_cast<uintptr_t>(__builtin_return_address(0)) == callbackXE->tglClockOffCaller &&
 		reg == tx.clockReg && !(value & 0xF0000000U) &&

@@ -136,6 +136,7 @@
   "-wexoff": [
     "-wxeoff"
   ],
+  "-wex-adls-tc3-hdmi": [],
   "-wexdbg": [
     "-wxedbg"
   ],

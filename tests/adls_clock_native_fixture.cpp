@@ -29,6 +29,11 @@ void writeReg(void *p,unsigned long reg,uint32_t v){
  if(reinterpret_cast<uintptr_t>(__builtin_return_address(0))==reinterpret_cast<uintptr_t>(image+0x6d973))
   TGLComboPLLFraction::adjust(at<uint32_t>(ctl,0xEA8),reg==0x164294?0x164284:reg,v);
  if(managed){
+  if(translation.phyDGateSite(reg,pc)) {
+   assert(translation.applyPhyDGate([](uint32_t address){return mmio.at(address);},
+    [](uint32_t address,uint32_t value){events.push_back({1,address,value});mmio.at(address)=value;}));
+   return;
+  }
   reg=translation.reg(reg,pc);
   if(reg==0x164280 && translation.enabling && pc==0x6d77e) {
    v=translation.mux(v,pc);
@@ -49,8 +54,8 @@ void writeReg(void *p,unsigned long reg,uint32_t v){
 }
 void mailbox(void *p,uint32_t command,uint32_t value,bool wait){assert(p==ctl && command==7 && !wait);events.push_back({2,command,value});}
 uint32_t voltage(void *p){assert(p==ctl);return 1;}
-void getDDI(void *p){assert(p==port && (at<uint32_t *>(p,0x548)[0]==0 || at<uint32_t *>(p,0x548)[0]==3 || at<uint32_t *>(p,0x548)[0]==4));events.push_back({3,3,1});}
-void putDDI(void *p){assert(p==port && (at<uint32_t *>(p,0x548)[0]==0 || at<uint32_t *>(p,0x548)[0]==3 || at<uint32_t *>(p,0x548)[0]==4));events.push_back({3,3,0});}
+void getDDI(void *p){assert(p==port && (at<uint32_t *>(p,0x548)[0]==0 || at<uint32_t *>(p,0x548)[0]==3 || at<uint32_t *>(p,0x548)[0]==4 || at<uint32_t *>(p,0x548)[0]==5));events.push_back({3,3,1});}
+void putDDI(void *p){assert(p==port && (at<uint32_t *>(p,0x548)[0]==0 || at<uint32_t *>(p,0x548)[0]==3 || at<uint32_t *>(p,0x548)[0]==4 || at<uint32_t *>(p,0x548)[0]==5));events.push_back({3,3,0});}
 void delay(unsigned n){assert(n==1);++delays;}
 void error(const char *,...){++errors;}
 void redirectCall(unsigned site,uintptr_t target,unsigned stub){
@@ -170,6 +175,31 @@ int main(int argc,char **argv){
   fault=0;errors=delays=0;assert(run(0,false).pll==1);
   assert(!allocation.binding[0] && !mmio[0x46014] && mmio[0x46010]==0xcc000000);
  }
+ // Native logical slot 2 supplies the clock code for DDI 5. In this
+ // HDMI-on-PHY-D test, PHY C already drives DP through PLL2.
+ setup();routeOn(2,2);
+ const auto dpBefore=mmio;
+ config[0]=5;config[1]=11;config[2]=2;config[4]=0x800;config[5]=0x202;
+ AlderLakeS::Port phyD;assert(AlderLakeS::Port::resolve(5,phyD));
+ const auto hdmiOn=allocation.choose(phyD,snapshot(),true);
+ assert(hdmiOn.valid && hdmiOn.pll!=2);
+ allocation.binding[3]=hdmiOn.pll+1;
+ translation={3,hdmiOn.pll,true};managed=true;
+ uint32_t params[]={464,2049,2,3,2};
+ at<uint32_t>(ctl,0xEA8)=2;
+ enable(ctl,port,nullptr,params);
+ AlderLakeS::PLL hdmiPLL;assert(AlderLakeS::PLL::resolve(hdmiOn.pll,hdmiPLL));
+ AlderLakeS::HDMIClock expected;assert(AlderLakeS::HDMIClock::encode(params,2,expected));
+ assert(!errors && !delays && config[0]==5 && mmio.at(hdmiPLL.enable)==0xCC000000);
+ assert(mmio.at(hdmiPLL.cfg0)==expected.cfg0 && mmio.at(hdmiPLL.cfg1)==expected.cfg1);
+ assert(mmio.at(0x1642bc)==(0x20|hdmiOn.pll));
+ const auto hdmiOff=allocation.choose(phyD,snapshot(),false);
+ assert(hdmiOff.valid && !hdmiOff.keepPLL && hdmiOff.pll==hdmiOn.pll);
+ translation={3,hdmiOff.pll,false};disable(ctl,port,nullptr);managed=false;
+ assert(!errors && !delays && config[0]==5 && !mmio.at(hdmiPLL.enable));
+ assert(mmio.at(0x1642bc)&0x10);
+ for(auto reg:{0x164280,0x46018,0x164294,0x164298})assert(mmio.at(reg)==dpBefore.at(reg));
+ puts("PASS native TC3 HDMI clock enable and teardown with active TC2 DP");
  // Exhaustion refuses allocation; an enabled unknown PLL is never commandeered.
  setup();routeOn(1,0);routeOn(2,1);routeOn(3,2);
  AlderLakeS::Port a;AlderLakeS::Port::resolve(0,a);assert(!allocation.choose(a,snapshot(),true).valid);

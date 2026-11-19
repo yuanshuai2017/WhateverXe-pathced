@@ -35,15 +35,18 @@ struct DisplayDonorCapacity {
     static constexpr uint32_t comboSlots(Donor donor) {return donor==Donor::C004FC1A?3:0;}
 };
 struct ADLSComboBackend {
+    static constexpr uint32_t tc3 = 1U << 5;
+    static constexpr bool tc3HDMIIdentity(uint32_t identity) {return identity==0x46908086U;}
     static constexpr uint32_t mask(Donor donor) {
         uint32_t mask=0;
         for(uint32_t i=0;i<ADLSComboResources::physicalCount;++i)
             if(i<DisplayDonorCapacity::comboSlots(donor))mask|=1U<<ADLSComboResources::ddi(i);
         return mask;
     }
-    static constexpr bool clockSlot(Donor donor,uint32_t port,uint32_t &slot) {
+    static constexpr bool clockSlot(Donor donor,uint32_t port,uint32_t &slot,bool tc3HDMI=false) {
         slot=ADLSComboResources::phy(port);
-        if(slot<DisplayDonorCapacity::comboSlots(donor))return true;
+        if(slot<DisplayDonorCapacity::comboSlots(donor) ||
+           (tc3HDMI && port==5 && donor==Donor::C004FC1A))return true;
         slot=~0U;return false;
     }
 };

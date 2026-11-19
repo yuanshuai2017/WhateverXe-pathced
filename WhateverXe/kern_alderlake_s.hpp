@@ -22,6 +22,11 @@ struct GT : XELP::SmallGTResources {
 static_assert(sizeof(GT)==6*sizeof(uint32_t),"Preserve GT resource layout");
 // The donor has three Combo clock slots. D/E need a separate clock allocator.
 constexpr uint32_t ComboBackendMask=XELP::ADLSComboBackend::mask(XELP::Donor::C004FC1A); // physical A/TC1/TC2, PHY A/B/C
+constexpr uint32_t TC3=XELP::ADLSComboBackend::tc3;
+// Lenovo PCI subsystem 17aa:332c with the confirmed HDMI-D VBT route.
+inline bool tc3HDMIBoard(bool requested,uint32_t pci,uint32_t subsystem) {
+    return requested && XELP::ADLSComboBackend::tc3HDMIIdentity(pci) && subsystem==0x332C17AAU;
+}
 struct Port {
     uint32_t ddi {},phy {},buffer {},clock {},clockShift {},clockOff {},hpd {};
     static bool resolve(uint32_t ddi,Port &out) {
@@ -65,10 +70,12 @@ struct Wiring {
     uint32_t hdmi {},dp {},excluded {},pin[XELP::PortCount] {},panel {};
     bool valid {};
     uint32_t selected() const {return hdmi|dp|panel;}
+    uint32_t backend() const {return ComboBackendMask|(hdmi&TC3);}
     bool hasDP(uint32_t d) const {return valid && d<XELP::PortCount && (dp&(1U<<d));}
     bool matches(const uint32_t *c,bool wantDP) const {
         if(!valid || !c || c[0]>=XELP::PortCount ||
            !((wantDP?dp:hdmi)&(1U<<c[0])))return false;
+        if(c[0]==5 && (wantDP || c[1]!=11))return false;
         return c[1]==pin[c[0]] && c[2]==(wantDP?1U:2U) && !c[3] &&
             c[4]==(wantDP?0x400U:0x800U) && c[5]==(wantDP?0x201U:0x202U);
     }
@@ -101,10 +108,11 @@ struct Wiring {
     }
     uint32_t hotplugMode(bool ready,const uint32_t *c,const void *platform,
                          uintptr_t caller,uintptr_t hpdCaller,uint32_t requested) const {
-        return ready && boundDP(platform,c) && hpdCaller && caller==hpdCaller && requested==4 ? 1 : requested;
+        const bool fixed=boundDP(platform,c) || ((hdmi&TC3) && bound(platform,c) && c[0]==5);
+        return ready && fixed && hpdCaller && caller==hpdCaller && requested==4 ? 1 : requested;
     }
     bool apply(void *platform,size_t bytes) const {
-        if(!valid || !selected() || (panel&~1U) || (panel&(hdmi|dp)) || (selected()&~ComboBackendMask) || !platform || bytes<0x1C0)return false;
+        if(!valid || !selected() || (panel&~1U) || (panel&(hdmi|dp)) || (selected()&~backend()) || !platform || bytes<0x1C0)return false;
         auto p=static_cast<uint8_t *>(platform);
         if(p[0x12]!=9)return false;
         // The exact donor's platform tail selects no TCON / Camellia / Banksia.
@@ -127,7 +135,7 @@ struct Wiring {
         if(panel)*reinterpret_cast<uint32_t *>(p+0x190)=0;
         return true;
     }
-    static Wiring fromFirmware(const XELP::VBT::Ports &ports) {
+    static Wiring fromFirmware(const XELP::VBT::Ports &ports,bool tc3HDMI=false) {
         Wiring out;
         if(!ports.valid())return out;
         out.excluded=ports.present;
@@ -136,12 +144,15 @@ struct Wiring {
             if(XELP::PanelPower::select(ports.panel,zero,0,0,0).valid){out.panel=1;out.excluded&=~1U;}
         }
         for(unsigned d=0;d<XELP::PortCount;++d) {
-            if(!(ports.present&ComboBackendMask&(1U<<d)))continue;
+            if(!(ports.present&(1U<<d)))continue;
             const auto &p=ports.port[d];Port port;
             if(!Port::resolve(d,port) || XELP::VBT::ddi(XELP::Family::AlderLakeS,p.dvo)!=d)continue;
             const bool isHDMI=p.fixedTMDS();
             const bool isDP=(p.type&0x14)==0x14 && !(p.type&(0x1000|0x400|0x20|1)) &&
                 !(p.flags&0x17) && !(p.capabilities&3);
+            if(!(ComboBackendMask&(1U<<d)) &&
+               !(tc3HDMI && d==5 && isHDMI && p.dvo==3 && p.ddc==4 && !p.aux &&
+                 !(ports.ambiguous&TC3)))continue;
             if(!isHDMI && !isDP)continue;
             // The native AUX engine is tied to physical DDI. Cross-routed
             // AUX requires its own backend; DDC is independently programmable.
@@ -169,9 +180,9 @@ struct PLL {
 };
 // Keep physical DDI/AUX registers; populate only the separate Combo bank.
 // PHY A has a native table: validate it and correct its duplicated lane2 slot.
-inline bool comboRegisters(uint32_t ddi,uint32_t *registers,size_t count) {
+inline bool comboRegisters(uint32_t ddi,uint32_t *registers,size_t count,bool tc3HDMI=false) {
     Port port;
-    if(!Port::resolve(ddi,port) || !(ComboBackendMask&(1U<<ddi)) || !registers ||
+    if(!Port::resolve(ddi,port) || !((ComboBackendMask|(tc3HDMI?TC3:0))&(1U<<ddi)) || !registers ||
        count!=0x128/4 || registers[4]!=port.buffer ||
        registers[(0x64C-0x580)/4]!=(ddi?0x46100+4*ddi:0))return false;
     const uint32_t offsets[]={

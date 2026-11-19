@@ -137,7 +137,7 @@ private:
     static bool comboClockPower(void *,bool);
     static uint32_t comboClockRead(void *,unsigned long);
     static void comboClockWrite(void *,unsigned long,uint32_t);
-    static void comboClockTranslateWrite(void *,unsigned long &,uint32_t &,uintptr_t);
+    static bool comboClockTranslateWrite(void *,unsigned long &,uint32_t &,uintptr_t);
     static void wrapTGLComboEnableClocks(void *,void *,void *,uint32_t *);
     static bool comboBeginClock(void *controller,void *port,bool enable,bool &keepPLL,void *other=nullptr);
     static void comboEndClock();
