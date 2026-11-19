@@ -1,9 +1,35 @@
 # WhateverXe
 
-[日本語](README_ja.md)
+[简体中文](README.zh-CN.md) · [日本語](README_ja.md)
 
 WhateverXe is a Lilu plugin, derived from WhateverGreen, that adapts Apple graphics drivers for selected Intel Xe-LP integrated GPUs.
 Use the latest releases of [WhateverXe](https://github.com/b00t0x/WhateverXe/releases) and [WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases) together. See [CHANGELOG](CHANGELOG.md) for release notes.
+
+## TC3 HDMI test branch
+
+This branch is based on WhateverXe 0.8.3. It adds opt-in support for native HDMI wired to DDI 5 (TC3) on a Lenovo Alder Lake-S desktop with a Core i5-12500, UHD 770 (`8086:4690`) and PCI subsystem `17aa:332c`. The firmware must describe a fixed HDMI-D port on DDI 5 with DDC 4. The branch has been tested on macOS Tahoe 26.7.3 with WhateverXe Graphics 0.4.4, using DDI 4 DisplayPort and DDI 5 HDMI at the same time. Coverage includes cold boot, HDMI reconnection, display sleep and short system sleep. Other boards and longer sleep cycles remain unverified.
+
+### Build and install
+
+1. Start with a working [OpenCore setup](#installation) and [WhateverXe Graphics 0.4.4](https://github.com/b00t0x/WhateverXe-Graphics/releases/tag/v0.4.4). Back up the original EFI, `/Library/Extensions/AppleIntelTGLCompat.kext` and `/Library/KernelCollections/AuxiliaryKernelExtensions.kc`. Prepare a bootable USB copy of the EFI for testing.
+2. Follow [Build and test](#build-and-test) for dependencies, then run `python3 tools/build.py` from this branch to build the DEBUG pair. Use both `build/WhateverXe.kext` and `build/AppleIntelTGLCompat.kext` from the same build.
+3. Sign the new Compat and generate a matching codeless injector using the [AMFIAnchor signing guide](https://github.com/b00t0x/AMFIAnchor/blob/main/Docs/Signing.md). Add this injector after `AMFIAnchor.kext` in the USB OpenCore config and keep the original Graphics injector enabled. Boot the USB EFI with the known-working driver pair first. Use `ioreg -r -c AMFIAnchor -l` to confirm that both anchors appear in `LoadedAnchors`.
+4. Replace only `AppleIntelTGLCompat.kext` in `/Library/Extensions` with the signed build and rebuild AuxKC using the [Graphics 0.4.4 AuxKC procedure](https://github.com/b00t0x/WhateverXe-Graphics/blob/v0.4.4/uninstall.sh#L8-L24). The linked script also removes Graphics. Refer to its `update_auxkc` function only. If rebuilding fails, restore the original Compat and AuxKC before restarting.
+5. Replace `WhateverXe.kext` in the USB EFI and append `-wex-adls-tc3-hdmi` to the existing OpenCore `boot-args`. Keep your existing required arguments. Boot from the USB EFI with both monitors connected directly. Omitting the TC3 argument leaves the experimental route disabled.
+
+### Verify and roll back
+
+Check that macOS detects both displays and that the test pair is loaded. The build keeps the upstream bundle versions, so compare the loaded UUIDs with `dwarfdump --uuid` on the two built executables.
+
+```sh
+kmutil showloaded | grep -E 'org\.b00t0x\.(WhateverXe|AppleIntelTGLCompat)'
+ioreg -lw0 -d 1 | grep -E 'ADLSFirmwareRoutes|XELPSharedProbeBound|WEXADLSTC3HDMIClock'
+system_profiler SPDisplaysDataType
+```
+
+With the HDMI display connected, look for `XELPSharedProbeBound = Yes` and `WEXADLSTC3HDMIClockEnabled = Yes`. Test HDMI unplug/replug while the DP display stays online.
+
+To restore the original setup, first restore the backed-up Compat. Then rebuild AuxKC or restore the matching original AuxKC from the same macOS build. Boot the original EFI afterward. If the desktop is unavailable, use macOS Recovery to restore the two system-side backups on the Data volume. Booting the original EFI alone leaves the replaced Compat and AuxKC on disk.
 
 ## Compatibility
 
@@ -100,7 +126,7 @@ The common regression checks cover Metal, OpenGL, OpenCL, hardware H.264 encode/
 
 MIPI DSI support is **experimental**, limited to the tested GPD MicroPC 2 and CHUWI MiniBook X N100/U300 panels. Do not expect it to work on other devices.
 
-System sleep/wake support is **experimental**. Tested configurations are MiniBook X N100/U300 (MIPI DSI) on Big Sur and Tahoe with model-specific ACPI settings, using the internal display alone or up to two external displays. Other models, OS versions and prolonged DarkWake cycles remain unverified.
+System sleep/wake support is **experimental**. Tested configurations are MiniBook X N100/U300 (MIPI DSI) on Big Sur and Tahoe with model-specific ACPI settings, using the internal display alone or up to two external displays. See the [TC3 HDMI test branch](#tc3-hdmi-test-branch) for the desktop result. Prolonged DarkWake cycles remain unverified.
 
 ### Known issues and limits
 

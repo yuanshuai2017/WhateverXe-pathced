@@ -1,9 +1,35 @@
 # WhateverXe
 
-[English](README.md)
+[English](README.md) · [简体中文](README.zh-CN.md)
 
 WhateverXeは、WhateverGreenを基に開発した、一部のIntel Xe-LP内蔵GPU向けにAppleのグラフィックスドライバーを適応させるLiluプラグインです。
 [WhateverXe](https://github.com/b00t0x/WhateverXe/releases)と[WhateverXe Graphics](https://github.com/b00t0x/WhateverXe-Graphics/releases)は両方とも最新版を使用してください。変更点は[CHANGELOG](CHANGELOG.md)を参照してください。
+
+## TC3 HDMI テストブランチ
+
+このブランチはWhateverXe 0.8.3をベースに、DDI 5（TC3）に配線されたネイティブHDMIをオプトインで有効にします。対象はCore i5-12500、UHD 770（`8086:4690`）、PCIサブシステム`17aa:332c`のLenovo Alder Lake-Sデスクトップです。ファームウェアにDDI 5の固定HDMI-DポートとDDC 4が記録されている必要があります。macOS Tahoe 26.7.3とWhateverXe Graphics 0.4.4で、DDI 4のDisplayPortとDDI 5のHDMIの同時出力を確認しました。コールドブート、HDMIの再接続、画面の消灯復帰、短時間のシステムスリープからの復帰を確認済みです。他の基板や長時間のスリープは未検証です。
+
+### ビルドと導入
+
+1. 動作確認済みの[OpenCore構成](#インストール)と[WhateverXe Graphics 0.4.4](https://github.com/b00t0x/WhateverXe-Graphics/releases/tag/v0.4.4)を用意します。元のEFI、`/Library/Extensions/AppleIntelTGLCompat.kext`、`/Library/KernelCollections/AuxiliaryKernelExtensions.kc`をバックアップし、テスト用にEFIを起動可能なUSBにコピーします。
+2. [ビルドとテスト](#ビルドとテスト)に従って依存関係を用意し、このブランチで`python3 tools/build.py`を実行してDEBUG版をビルドします。同じビルドの`build/WhateverXe.kext`と`build/AppleIntelTGLCompat.kext`を使用します。
+3. [AMFIAnchorの署名ガイド](https://github.com/b00t0x/AMFIAnchor/blob/main/Docs/Signing.md)に従い、新しいCompatに署名して対応するcodeless injectorを生成します。USB側のOpenCoreで`AMFIAnchor.kext`の後に追加し、元のGraphics用injectorも有効にしておきます。まず動作確認済みのドライバーの組み合わせでUSB EFIから起動し、`ioreg -r -c AMFIAnchor -l`で両方のアンカーが`LoadedAnchors`に表示されることを確認します。
+4. `/Library/Extensions`の`AppleIntelTGLCompat.kext`だけを署名済みビルドに置き換え、[Graphics 0.4.4のAuxKC生成手順](https://github.com/b00t0x/WhateverXe-Graphics/blob/v0.4.4/uninstall.sh#L8-L24)に従ってAuxKCを再生成します。リンク先のスクリプトにはGraphicsの削除処理も含まれるため、`update_auxkc`関数だけを参照してください。再生成が失敗した場合は、再起動する前に元のCompatとAuxKCを復元します。
+5. USB EFIの`WhateverXe.kext`を置き換え、既存のOpenCoreの`boot-args`に`-wex-adls-tc3-hdmi`を追加します。既存の必須引数は残し、両方のディスプレイを直結した状態でUSB EFIから起動します。この引数を省略した場合、試験的なTC3経路は無効です。
+
+### 確認と復元
+
+macOSが両方の画面を認識し、テスト版の2つのkextを読み込んだことを確認します。バンドルのバージョン番号は上流版と同じなので、読み込まれたUUIDを、ビルド済みの各実行ファイルに対する`dwarfdump --uuid`の結果と照合します。
+
+```sh
+kmutil showloaded | grep -E 'org\.b00t0x\.(WhateverXe|AppleIntelTGLCompat)'
+ioreg -lw0 -d 1 | grep -E 'ADLSFirmwareRoutes|XELPSharedProbeBound|WEXADLSTC3HDMIClock'
+system_profiler SPDisplaysDataType
+```
+
+HDMI画面を接続した状態で`XELPSharedProbeBound = Yes`と`WEXADLSTC3HDMIClockEnabled = Yes`を確認します。さらにHDMIを抜き差しし、その間もDP画面が表示を維持することを確かめます。
+
+元に戻す場合は、まずバックアップしたCompatを復元します。続けてAuxKCを再生成するか、同じmacOSビルドで保存した元のAuxKCを復元します。その後、元のEFIから起動します。デスクトップに入れない場合は、macOS復旧からDataボリューム上のシステム側の2つのバックアップを復元します。元のEFIから起動するだけでは、ディスク上のCompatとAuxKCは復元されません。
 
 ## 対応範囲
 
@@ -100,7 +126,7 @@ BIOS/UEFIで設定できる場合は、**DVMT Pre-Allocatedを96MB**にします
 
 MIPI DSI対応は**試験的**で、検証したGPD MicroPC 2・CHUWI MiniBook X N100/U300の内蔵パネルに限ります。他の機器での動作を期待しないでください。
 
-システム全体のスリープ／復帰対応は**試験的**です。実機確認済みの構成は、機種別ACPI設定を使用したMiniBook X N100/U300（MIPI DSI）のBig Sur・Tahoeで、内蔵単独と外部2画面までです。他機種・他OSと長時間のDarkWake反復は未検証です。
+システム全体のスリープ／復帰対応は**試験的**です。実機確認済みの構成は、機種別ACPI設定を使用したMiniBook X N100/U300（MIPI DSI）のBig Sur・Tahoeで、内蔵単独と外部2画面までです。デスクトップでの結果は[TC3 HDMI テストブランチ](#tc3-hdmi-テストブランチ)を参照してください。長時間のDarkWake反復は未検証です。
 
 ### 既知の問題と制限
 
